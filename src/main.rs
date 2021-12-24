@@ -25,7 +25,8 @@ fn main() -> Result<()> {
 
     check_and_download_crates(parse_index(index_iterator().collect())?)?;
 
-    let macros = find_proc_macros(cargo_toml_iterator().collect())?;
+    let fs_iterator: Vec<_> = cargo_toml_iterator().collect();
+    let macros = find_proc_macros(&fs_iterator)?;
 
     let weird_deps = find_weird_dependencies(macros);
 
@@ -227,10 +228,10 @@ struct TomlLib {
 }
 
 
-fn find_proc_macros(cargo_toml_files: Vec<DirEntry>) -> Result<BTreeMap<String, CargoToml>> {
+fn find_proc_macros(cargo_toml_files: &[DirEntry]) -> Result<BTreeMap<String, CargoToml>> {
     println!("Finding proc macros...");
     let progress_bar = ProgressBar::new(cargo_toml_files.len() as u64);
-    let map: BTreeMap<String, CargoToml> = cargo_toml_files.into_par_iter().map(|entry| {
+    let map: BTreeMap<String, CargoToml> = cargo_toml_files.par_iter().map(|entry| {
         progress_bar.inc(1);
         let toml_raw = fs::read_to_string(entry.path())?;
         let toml: CargoToml = match toml::from_str(&toml_raw) {
@@ -258,7 +259,27 @@ fn find_proc_macros(cargo_toml_files: Vec<DirEntry>) -> Result<BTreeMap<String, 
     Ok(map)
 }
 
-const NORMAL_DEPS: &[&str] = &["syn", "proc-macro2", "quote"];
+const NORMAL_DEPS: &[&str] = &[
+    "syn",
+    "proc-macro2",
+    "quote",
+    "proc-macro-error",
+    "proc-macro-crate",
+    "proc-macro-hack",
+    "darling",
+    "heck",
+    "lazy_static",
+    "regex",
+    "Inflector",
+    "anyhow",
+    "convert_case",
+    "itertools",
+    "once_cell",
+    "rand", // ????
+    "synstructure",
+    "unicode-xid",
+    "failure",
+];
 
 fn find_weird_dependencies(mapping: BTreeMap<String, CargoToml>) -> BTreeMap<String, CargoToml>{
     println!("Finding weird dependencies...");
@@ -291,6 +312,16 @@ fn write_data(data: BTreeMap<String, CargoToml>) -> Result<()> {
 
     let stats = dashmap::DashMap::new();
 
+    let data = data.into_par_iter().filter_map(|(key, value)| {
+        if value.dependencies.as_ref().map(|deps| deps.len()).unwrap_or_default() > 1 {
+            Some((key, value))
+        } else {
+            None
+        }
+    }).collect::<BTreeMap<_, _>>();
+
+    println!("Found {} proc macro crates with > 1 dependency, excluding 'standard' dependencies", data.len());
+
     let dependencies: Vec<_> = data.into_par_iter().map(|(name, value)| {
         let deps: Vec<_> = value.dependencies.unwrap().into_keys().collect();
         for dep in &deps {
@@ -304,6 +335,7 @@ fn write_data(data: BTreeMap<String, CargoToml>) -> Result<()> {
     let data = serde_json::to_string(&dependencies)?;
     File::create("data")?.write_all(data.as_bytes())?;
 
+    println!("Found {} non-standard dependencies", stats.len());
     let stats = serde_json::to_string(&stats)?;
     File::create("stats")?.write_all(stats.as_bytes())?;
 
